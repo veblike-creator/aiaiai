@@ -279,13 +279,15 @@ async def edit_image_with_seededit(prompt: str, image_base64: str):
     """Редактирование изображения через SeedEdit (GenAPI) - 6₽"""
     try:
         async with aiohttp.ClientSession() as session:
-            # Правильный формат для GenAPI SeedEdit
+            # GenAPI требует image как data URI
+            image_data_uri = f"data:image/jpeg;base64,{image_base64}"
+
             payload = {
                 "prompt": prompt,
-                "image": image_base64,      # Base64 изображение
-                "model": "seededit",        # Модель
-                "is_sync": True,            # Синхронный режим
-                "translate_input": True     # Перевод промпта
+                "image": image_data_uri,    # Data URI!
+                "model": "seededit",
+                "is_sync": True,
+                "translate_input": True
             }
             headers = {
                 "Authorization": f"Bearer {GENAPI_KEY}",
@@ -302,16 +304,26 @@ async def edit_image_with_seededit(prompt: str, image_base64: str):
                     return None
 
                 result = await resp.json()
-                logging.info(f"SeedEdit response: {result}")
+                logging.info(f"SeedEdit response keys: {result.keys()}")
 
-                # GenAPI синхронный режим возвращает output -> images
-                if "output" in result and isinstance(result["output"], list) and len(result["output"]) > 0:
-                    img_b64 = result["output"][0]
-                    return base64.b64decode(img_b64)
-                elif "output" in result and isinstance(result["output"], str):
-                    return base64.b64decode(result["output"])
+                # GenAPI возвращает output с base64 или data URI
+                if "output" in result:
+                    output = result["output"]
+                    if isinstance(output, list) and len(output) > 0:
+                        img_data = output[0]
+                    elif isinstance(output, str):
+                        img_data = output
+                    else:
+                        logging.error(f"Unknown output format: {output}")
+                        return None
+
+                    # Если это data URI, извлекаем base64
+                    if isinstance(img_data, str) and img_data.startswith("data:"):
+                        img_data = img_data.split(",", 1)[1]
+
+                    return base64.b64decode(img_data)
                 else:
-                    logging.error(f"No image in SeedEdit response: {result}")
+                    logging.error(f"No output in response: {result}")
                     return None
 
     except Exception as e:
