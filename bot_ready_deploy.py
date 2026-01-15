@@ -13,12 +13,12 @@ import aiohttp
 import aiosqlite
 import json
 from datetime import date
-from openai import AsyncOpenAI
-from io import BytesIO
 
 TELEGRAM_TOKEN = "8217361037:AAEgJ6NugPqXDNX_stIOL5g7R1ovBxsLAWM"
 ADMIN_ID = 6387718314
 API_KEY = "sk-aitunnel-9ho4TkDH1Vxr0koqvpQtPS1mL2Yyv1v8"
+GENAPI_KEY = "sk-dd7I7EH6Gtg0zBTDManlSPCLoBN8rQPAatfF57GFebec8vgBHVbnx15JTKMa"
+GENAPI_URL = "https://api.gen-api.ru/v1/images/generations"
 API_URL = "https://api.aitunnel.ru/v1/chat/completions"
 SYSTEM_PROMPT = "Ты - AI ассистент. ВСЕГДА отвечай ТОЛЬКО на русском языке, независимо от языка вопроса пользователя. Если пользователь пишет на другом языке - всё равно отвечай по-русски. Исключение: только если пользователь явно просит ответить на английском языке."
 
@@ -31,19 +31,12 @@ bot = Bot(token=TELEGRAM_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# AI Tunnel для генерации изображений
-aitunnel_client = AsyncOpenAI(
-    api_key=API_KEY,
-    base_url='https://api.aitunnel.ru/v1/'
-)
-
 FREE_MODELS = ["gpt-4.1-mini"]
 VISION_MODELS = ["gpt-4o", "gpt-4o-mini", "claude-sonnet-4.5", "claude-opus-4.5", "gemini-2.5-pro", "gemini-2.5-flash"]
 
 # Состояния для генерации изображений
 class ImageGenStates(StatesGroup):
     waiting_prompt = State()
-    waiting_edit_prompt = State()
 
 # FSM состояния для работы с фото
 class ImageGenState(StatesGroup):
@@ -732,115 +725,128 @@ async def handle_message(message: Message):
     else:
         await message.answer(f"🤖 <b>{model_name}</b> | Осталось: {remaining}\n\n{response}", parse_mode="HTML")
 
-# ============== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ ==============
+# ============== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЙ (GenAPI SD3) ==============
 
 @dp.message(F.text == "🎨 Генерация изображений")
 async def image_menu(message: Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Создать", callback_data="img_generate")],
-        [InlineKeyboardButton(text="🖼 Редактировать", callback_data="img_edit")],
-        [InlineKeyboardButton(text="ℹ️ Инфо", callback_data="img_info")]
+        [InlineKeyboardButton(text="✨ Создать изображение", callback_data="img_gen")],
+        [InlineKeyboardButton(text="ℹ️ Информация", callback_data="img_info")]
     ])
-    await message.answer("🎨 <b>Генерация изображений</b>\n\nВыберите действие:", parse_mode="HTML", reply_markup=kb)
+    await message.answer(
+        "🎨 <b>Генерация изображений</b>\n\n"
+        "⚙️ Модель: Stable Diffusion 3\n"
+        "💰 Стоимость: ~2₽ за изображение\n\n"
+        "Выберите действие:",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
 
 @dp.callback_query(F.data == "img_info")
 async def image_info(callback: types.CallbackQuery):
     await callback.message.edit_text(
         "🎨 <b>Генерация изображений</b>\n\n"
-        "✨ Создать - опишите что хотите\n"
-        "🖼 Редактировать - загрузите фото\n\n"
-        "💡 Примеры: закат, кот в космосе",
+        "⚙️ Модель: Stable Diffusion 3 (GenAPI)\n"
+        "💰 Цена: 2₽ за изображение\n"
+        "📏 Размер: 1024x1024\n\n"
+        "💡 <b>Примеры промтов:</b>\n"
+        "• A beautiful sunset over the ocean\n"
+        "• A cat in space suit\n"
+        "• Futuristic city at night\n\n"
+        "🇷🇺 Лучше описывать на английском для качества",
         parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="img_back")]])
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="img_back")]
+        ])
     )
     await callback.answer()
 
 @dp.callback_query(F.data == "img_back")
-async def image_menu_back(callback: types.CallbackQuery):
+async def image_back(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✨ Создать", callback_data="img_generate")],
-        [InlineKeyboardButton(text="🖼 Редактировать", callback_data="img_edit")],
-        [InlineKeyboardButton(text="ℹ️ Инфо", callback_data="img_info")]
+        [InlineKeyboardButton(text="✨ Создать изображение", callback_data="img_gen")],
+        [InlineKeyboardButton(text="ℹ️ Информация", callback_data="img_info")]
     ])
-    await callback.message.edit_text("🎨 <b>Генерация</b>\n\nВыберите:", parse_mode="HTML", reply_markup=kb)
+    await callback.message.edit_text(
+        "🎨 <b>Генерация изображений</b>\n\n"
+        "⚙️ Модель: Stable Diffusion 3\n"
+        "💰 Стоимость: ~2₽ за изображение\n\n"
+        "Выберите действие:",
+        parse_mode="HTML",
+        reply_markup=kb
+    )
     await callback.answer()
 
-@dp.callback_query(F.data == "img_generate")
+@dp.callback_query(F.data == "img_gen")
 async def start_gen(callback: types.CallbackQuery, state: FSMContext):
     await state.set_state(ImageGenStates.waiting_prompt)
-    await callback.message.answer("✨ Опишите что хотите увидеть\n\n/cancel - отмена")
-    await callback.answer()
-
-@dp.callback_query(F.data == "img_edit")
-async def start_edit(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(ImageGenStates.waiting_edit_prompt)
-    await callback.message.answer("🖼 Отправьте фото\n\n/cancel - отмена")
+    await callback.message.answer(
+        "✨ <b>Создание изображения</b>\n\n"
+        "Опишите что вы хотите увидеть\n"
+        "(лучше на английском)\n\n"
+        "💡 Пример: A cat wearing sunglasses\n\n"
+        "/cancel - отмена",
+        parse_mode="HTML"
+    )
     await callback.answer()
 
 @dp.message(ImageGenStates.waiting_prompt)
-async def gen_image(message: Message, state: FSMContext):
+async def generate_image(message: Message, state: FSMContext):
     if message.text == "/cancel":
         await state.clear()
-        await message.answer("❌ Отменено")
+        await message.answer("❌ Генерация отменена")
         return
+
     user_id = message.from_user.id
     can_send, _ = await db.check_limit(user_id)
     if not can_send:
         await state.clear()
-        await message.answer("❌ Лимит исчерпан!")
+        await message.answer("❌ Лимит исчерпан! Попробуйте завтра.")
         return
+
     await bot.send_chat_action(message.chat.id, "upload_photo")
     await db.increment_messages(user_id)
+
     try:
-        result = await aitunnel_client.images.generate(
-            model='gpt-image-1', prompt=message.text, quality='medium',
-            size='1024x1024', moderation='low', output_format='png'
-        )
-        img = base64.b64decode(result.data[0].b64_json)
-        await message.answer_photo(BufferedInputFile(img, filename="img.png"), caption=f"✨ {message.text}")
-        await state.clear()
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        # Запрос к GenAPI
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "model": "sd3",
+                "prompt": message.text,
+                "n": 1,
+                "size": "1024x1024"
+            }
+            headers = {
+                "Authorization": f"Bearer {GENAPI_KEY}",
+                "Content-Type": "application/json"
+            }
+
+            async with session.post(GENAPI_URL, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    await message.answer(f"❌ Ошибка API: {error_text}")
+                    await state.clear()
+                    return
+
+                result = await resp.json()
+
+                # Получаем base64 изображение
+                if "data" in result and len(result["data"]) > 0:
+                    img_b64 = result["data"][0]["b64_json"]
+                    img_bytes = base64.b64decode(img_b64)
+
+                    await message.answer_photo(
+                        BufferedInputFile(img_bytes, filename="sd3.png"),
+                        caption=f"✨ <b>Ваше изображение</b>\n\n{message.text}\n\n🤖 Stable Diffusion 3",
+                        parse_mode="HTML"
+                    )
+                else:
+                    await message.answer("❌ Не удалось получить изображение")
+
         await state.clear()
 
-@dp.message(ImageGenStates.waiting_edit_prompt, F.photo)
-async def get_photo(message: Message, state: FSMContext):
-    await state.update_data(photo_id=message.photo[-1].file_id)
-    await message.answer("📸 Фото получено! Что изменить?")
-
-@dp.message(ImageGenStates.waiting_edit_prompt, F.text)
-async def edit_photo(message: Message, state: FSMContext):
-    if message.text == "/cancel":
-        await state.clear()
-        await message.answer("❌ Отменено")
-        return
-    data = await state.get_data()
-    photo_id = data.get('photo_id')
-    if not photo_id:
-        await message.answer("❌ Сначала отправьте фото!")
-        return
-    user_id = message.from_user.id
-    can_send, _ = await db.check_limit(user_id)
-    if not can_send:
-        await state.clear()
-        await message.answer("❌ Лимит!")
-        return
-    await bot.send_chat_action(message.chat.id, "upload_photo")
-    await db.increment_messages(user_id)
-    try:
-        file = await bot.get_file(photo_id)
-        photo = await bot.download_file(file.file_path)
-        buf = BytesIO(photo.read())
-        buf.name = 'p.jpg'
-        buf.seek(0)
-        result = await aitunnel_client.images.edit(
-            model='gpt-image-1', prompt=message.text, image=[buf],
-            quality='medium', size='1024x1024', moderation='low', output_format='png'
-        )
-        img = base64.b64decode(result.data[0].b64_json)
-        await message.answer_photo(BufferedInputFile(img, filename="edit.png"), caption=f"✨ {message.text}")
-        await state.clear()
     except Exception as e:
+        logging.error(f"Ошибка генерации: {e}")
         await message.answer(f"❌ Ошибка: {e}")
         await state.clear()
 
