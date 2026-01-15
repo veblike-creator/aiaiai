@@ -19,7 +19,6 @@ ADMIN_ID = 6387718314
 API_KEY = "sk-aitunnel-9ho4TkDH1Vxr0koqvpQtPS1mL2Yyv1v8"
 GENAPI_KEY = "sk-dd7I7EH6Gtg0zBTDManlSPCLoBN8rQPAatfF57GFebec8vgBHVbnx15JTKMa"
 GENAPI_URL = "https://api.gen-api.ru/v1/images/generations"
-GENAPI_FLUX2_URL = "https://api.gen-api.ru/v1/images/generations"  # Flux 2
 API_URL = "https://api.aitunnel.ru/v1/chat/completions"
 SYSTEM_PROMPT = "Ты - AI ассистент. ВСЕГДА отвечай ТОЛЬКО на русском языке, независимо от языка вопроса пользователя. Если пользователь пишет на другом языке - всё равно отвечай по-русски. Исключение: только если пользователь явно просит ответить на английском языке."
 
@@ -280,19 +279,24 @@ async def edit_image_with_flux2(prompt: str, image_base64: str):
     """Редактирование изображения через Flux 2 standard (GenAPI) - 3₽"""
     try:
         async with aiohttp.ClientSession() as session:
+            # Правильный формат для GenAPI Flux 2
             payload = {
-                "model": "flux-2-image-to-image",
+                "model": "standard",  # standard модель
+                "type": "image-to-image",
                 "prompt": prompt,
-                "image": f"data:image/jpeg;base64,{image_base64}",
-                "n": 1,
-                "size": "1024x1024"
+                "image": image_base64,  # Без префикса data:image
+                "num_images": 1,
+                "size": "1024x1024",
+                "is_sync": True  # Синхронный режим
             }
             headers = {
                 "Authorization": f"Bearer {GENAPI_KEY}",
                 "Content-Type": "application/json"
             }
 
-            async with session.post(GENAPI_FLUX2_URL, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+            url = "https://api.gen-api.ru/api/images/flux-2"
+
+            async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
                     logging.error(f"Flux 2 error: {resp.status} - {error_text}")
@@ -300,11 +304,12 @@ async def edit_image_with_flux2(prompt: str, image_base64: str):
 
                 result = await resp.json()
 
-                if "data" in result and len(result["data"]) > 0:
-                    img_b64 = result["data"][0]["b64_json"]
+                # GenAPI возвращает result -> images
+                if "result" in result and "images" in result["result"]:
+                    img_b64 = result["result"]["images"][0]
                     return base64.b64decode(img_b64)
                 else:
-                    logging.error("No image in Flux 2 response")
+                    logging.error(f"No image in Flux 2 response: {result}")
                     return None
 
     except Exception as e:
@@ -522,11 +527,11 @@ async def handle_photo(message: Message, state: FSMContext):
         await bot.send_chat_action(message.chat.id, "upload_photo")
         await db.increment_messages(message.from_user.id)
 
-        image_data = await edit_image_with_flux2(message.caption, photo_base64)
+        imagedata = await edit_image_with_flux2(message.caption, photo_base64)
 
-        if image_data:
-            photo_file = BufferedInputFile(image_data, filename="generated.png")
-            await message.answer_photo(photo_file, caption=f"✨ Готово!\n\n📝 {message.caption}\n\n🤖 Flux 2 (3₽)")
+        if imagedata:
+            photo_file = BufferedInputFile(imagedata, filename="generated.png")
+            await message.answer_photo(photo_file, caption=f"✨ {message.caption}\n\n🤖 Flux 2 (3₽)")
         else:
             await message.answer("❌ Ошибка генерации. Проверьте логи.")
 
@@ -614,11 +619,11 @@ async def process_photo_prompt(message: Message, state: FSMContext):
         await bot.send_chat_action(message.chat.id, "upload_photo")
         await db.increment_messages(message.from_user.id)
 
-        image_data = await edit_image_with_flux2(message.text, photo_base64)
+        imagedata = await edit_image_with_flux2(message.text, photo_base64)
 
-        if image_data:
-            photo_file = BufferedInputFile(image_data, filename="generated.png")
-            await message.answer_photo(photo_file, caption=f"✨ {message.text}\n\n🤖 Flux 2 (3₽)")
+        if imagedata:
+            photo_file = BufferedInputFile(imagedata, filename="generated.png")
+            await message.answer_photo(photo_file, caption=f"✨ {message.caption}\n\n🤖 Flux 2 (3₽)")
         else:
             await message.answer("❌ Ошибка генерации. Проверьте логи.")
 
