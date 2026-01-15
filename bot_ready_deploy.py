@@ -19,7 +19,6 @@ ADMIN_ID = 6387718314
 API_KEY = "sk-aitunnel-9ho4TkDH1Vxr0koqvpQtPS1mL2Yyv1v8"
 GENAPI_KEY = "sk-dd7I7EH6Gtg0zBTDManlSPCLoBN8rQPAatfF57GFebec8vgBHVbnx15JTKMa"
 GENAPI_URL = "https://api.gen-api.ru/v1/images/generations"
-GENAPI_FLUX_URL = "https://api.gen-api.ru/v1/images/flux-image-to-image"
 API_URL = "https://api.aitunnel.ru/v1/chat/completions"
 SYSTEM_PROMPT = "Ты - AI ассистент. ВСЕГДА отвечай ТОЛЬКО на русском языке, независимо от языка вопроса пользователя. Если пользователь пишет на другом языке - всё равно отвечай по-русски. Исключение: только если пользователь явно просит ответить на английском языке."
 
@@ -276,39 +275,65 @@ async def download_image(file_id: str) -> bytes:
 def encode_image_to_base64(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode('utf-8')
 
-async def edit_image_with_flux(prompt: str, image_base64: str):
-    """Редактирование через FLUX image-to-image (GenAPI)"""
+async def generate_image_from_photo(prompt: str, image_base64: str = None) -> bytes:
+    """Генерация/редактирование изображения через AITunnel API"""
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    # Если есть референсное фото - используем /images/edit
+    if image_base64:
+        endpoint = "https://api.aitunnel.ru/v1/images/edit"
+        payload = {
+            "model": "gpt-image-1",
+            "prompt": prompt,
+            "quality": "medium",
+            "size": "1024x1024",
+            "moderation": "low",
+            "output_format": "png",
+            "image": [f"data:image/png;base64,{image_base64}"]
+        }
+    else:
+        # Без фото - просто генерация
+        endpoint = "https://api.aitunnel.ru/v1/images/generate"
+        payload = {
+            "model": "gpt-image-1",
+            "prompt": prompt,
+            "quality": "medium",
+            "size": "1024x1024",
+            "moderation": "low",
+            "output_format": "png"
+        }
+
     try:
         async with aiohttp.ClientSession() as session:
-            payload = {
-                "model": "flux-image-to-image",
-                "prompt": prompt,
-                "image": f"data:image/jpeg;base64,{image_base64}",
-                "strength": 0.75,
-                "size": "1024x1024"
-            }
-            headers = {
-                "Authorization": f"Bearer {GENAPI_KEY}",
-                "Content-Type": "application/json"
-            }
+            async with session.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=120)
+            ) as response:
+                if response.status == 200:
+                    data = await response.json()
 
-            async with session.post(GENAPI_FLUX_URL, json=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logging.error(f"FLUX error: {resp.status} - {error_text}")
+                    # AITunnel возвращает b64_json в data[0]
+                    if 'data' in data and len(data['data']) > 0:
+                        b64_json = data['data'][0].get('b64_json')
+                        if b64_json:
+                            return base64.b64decode(b64_json)
+
+                    logging.error(f"No b64_json in response: {data}")
                     return None
-
-                result = await resp.json()
-
-                if "data" in result and len(result["data"]) > 0:
-                    img_b64 = result["data"][0]["b64_json"]
-                    return base64.b64decode(img_b64)
                 else:
-                    logging.error("No image in FLUX response")
+                    error_text = await response.text()
+                    logging.error(f"Image generation failed: {response.status} - {error_text}")
                     return None
-
+    except asyncio.TimeoutError:
+        logging.error("Image generation timeout")
+        return None
     except Exception as e:
-        logging.error(f"FLUX error: {e}")
+        logging.error(f"Image generation error: {e}")
         return None
 
 async def get_ai_response(user_message: str, model: str, user_id: int, image_base64: str = None) -> str:
@@ -507,27 +532,29 @@ async def handle_photo(message: Message, state: FSMContext):
 
     # Если есть caption - быстрая генерация
     if message.caption:
-        # Редактирование фото через FLUX
-        can_send, _ = await db.check_limit(message.from_user.id)
-        if not can_send:
-            await message.answer("❌ Лимит исчерпан!")
+        if not await is_premium(message.from_user.id):
+            await message.answer("❌ Генерация изображений только для Premium")
             await state.clear()
             return
-        
-        await message.answer("🎨 Редактирую фото...")
+
+        can_send, remaining = await db.check_limit(message.from_user.id)
+        if not can_send:
+            await message.answer("❌ Лимит исчерпан. Попробуйте завтра!")
+            await state.clear()
+            return
+
+        await message.answer("🎨 Генерирую изображение...")
         await bot.send_chat_action(message.chat.id, "upload_photo")
         await db.increment_messages(message.from_user.id)
-        
-        imagedata = await edit_image_with_flux(message.caption, photo_base64)
-        
-        if imagedata:
-            await message.answer_photo(
-                BufferedInputFile(imagedata, filename="edited.png"),
-                caption=f"✨ {message.caption}\\n\\n🤖 FLUX (5.5₽)",
-                parse_mode="HTML"
-            )
+
+        image_data = await generate_image_from_photo(message.caption, photo_base64)
+
+        if image_data:
+            photo_file = BufferedInputFile(image_data, filename="generated.png")
+            await message.answer_photo(photo_file, caption=f"✨ Готово!\n\n📝 {message.caption}")
         else:
-            await message.answer("❌ Ошибка. Попробуйте другой промт.")
+            await message.answer("❌ Ошибка генерации. Проверьте логи.")
+
         await state.clear()
     else:
         # Меню выбора
@@ -608,19 +635,18 @@ async def process_photo_prompt(message: Message, state: FSMContext):
             await message.answer(f"🤖 {model_name}:\n\n{response}")
 
     elif action == "generate":
-        await message.answer("🎨 Редактирую фото...")
+        await message.answer("🎨 Генерирую...")
         await bot.send_chat_action(message.chat.id, "upload_photo")
         await db.increment_messages(message.from_user.id)
-        
-        imagedata = await edit_image_with_flux(message.text, photo_base64)
-        
-        if imagedata:
-            await message.answer_photo(
-                BufferedInputFile(imagedata, filename="edit.png"),
-                caption=f"✨ {message.text}\\n\\n🤖 FLUX (5.5₽)"
-            )
+
+        image_data = await generate_image_from_photo(message.text, photo_base64)
+
+        if image_data:
+            photo_file = BufferedInputFile(image_data, filename="generated.png")
+            await message.answer_photo(photo_file, caption=f"✨ Готово!\n\n📝 {message.text}")
         else:
-            await message.answer("❌ Ошибка редактирования")
+            await message.answer("❌ Ошибка генерации. Проверьте логи.")
+
     await state.clear()
 
 
