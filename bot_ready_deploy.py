@@ -275,45 +275,47 @@ async def download_image(file_id: str) -> bytes:
 def encode_image_to_base64(image_bytes: bytes) -> str:
     return base64.b64encode(image_bytes).decode('utf-8')
 
-async def edit_image_with_flux2(prompt: str, image_base64: str):
-    """Редактирование изображения через Flux 2 standard (GenAPI) - 3₽"""
+async def edit_image_with_seededit(prompt: str, image_base64: str):
+    """Редактирование изображения через SeedEdit (GenAPI) - 6₽"""
     try:
         async with aiohttp.ClientSession() as session:
-            # Правильный формат для GenAPI Flux 2
+            # Правильный формат для GenAPI SeedEdit
             payload = {
-                "model": "standard",  # standard модель
-                "type": "image-to-image",
                 "prompt": prompt,
-                "image": image_base64,  # Без префикса data:image
-                "num_images": 1,
-                "size": "1024x1024",
-                "is_sync": True  # Синхронный режим
+                "image": image_base64,      # Base64 изображение
+                "model": "seededit",        # Модель
+                "is_sync": True,            # Синхронный режим
+                "translate_input": True     # Перевод промпта
             }
             headers = {
                 "Authorization": f"Bearer {GENAPI_KEY}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "Accept": "application/json"
             }
 
-            url = "https://api.gen-api.ru/api/images/flux-2"
+            url = "https://api.gen-api.ru/api/v1/networks/seededit"
 
             async with session.post(url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
                 if resp.status != 200:
                     error_text = await resp.text()
-                    logging.error(f"Flux 2 error: {resp.status} - {error_text}")
+                    logging.error(f"SeedEdit error: {resp.status} - {error_text}")
                     return None
 
                 result = await resp.json()
+                logging.info(f"SeedEdit response: {result}")
 
-                # GenAPI возвращает result -> images
-                if "result" in result and "images" in result["result"]:
-                    img_b64 = result["result"]["images"][0]
+                # GenAPI синхронный режим возвращает output -> images
+                if "output" in result and isinstance(result["output"], list) and len(result["output"]) > 0:
+                    img_b64 = result["output"][0]
                     return base64.b64decode(img_b64)
+                elif "output" in result and isinstance(result["output"], str):
+                    return base64.b64decode(result["output"])
                 else:
-                    logging.error(f"No image in Flux 2 response: {result}")
+                    logging.error(f"No image in SeedEdit response: {result}")
                     return None
 
     except Exception as e:
-        logging.error(f"Flux 2 error: {e}")
+        logging.error(f"SeedEdit error: {e}")
         return None
 
 async def get_ai_response(user_message: str, model: str, user_id: int, image_base64: str = None) -> str:
@@ -527,11 +529,11 @@ async def handle_photo(message: Message, state: FSMContext):
         await bot.send_chat_action(message.chat.id, "upload_photo")
         await db.increment_messages(message.from_user.id)
 
-        imagedata = await edit_image_with_flux2(message.caption, photo_base64)
+        image_data = await edit_image_with_seededit(message.caption, photo_base64)
 
-        if imagedata:
-            photo_file = BufferedInputFile(imagedata, filename="generated.png")
-            await message.answer_photo(photo_file, caption=f"✨ {message.caption}\n\n🤖 Flux 2 (3₽)")
+        if image_data:
+            photo_file = BufferedInputFile(image_data, filename="generated.png")
+            await message.answer_photo(photo_file, caption=f"✨ {message.caption}\n\n🤖 SeedEdit (6₽)")
         else:
             await message.answer("❌ Ошибка генерации. Проверьте логи.")
 
@@ -619,11 +621,11 @@ async def process_photo_prompt(message: Message, state: FSMContext):
         await bot.send_chat_action(message.chat.id, "upload_photo")
         await db.increment_messages(message.from_user.id)
 
-        imagedata = await edit_image_with_flux2(message.text, photo_base64)
+        image_data = await edit_image_with_seededit(message.text, photo_base64)
 
-        if imagedata:
-            photo_file = BufferedInputFile(imagedata, filename="generated.png")
-            await message.answer_photo(photo_file, caption=f"✨ {message.caption}\n\n🤖 Flux 2 (3₽)")
+        if image_data:
+            photo_file = BufferedInputFile(image_data, filename="generated.png")
+            await message.answer_photo(photo_file, caption=f"✨ {message.text}\n\n🤖 SeedEdit (6₽)")
         else:
             await message.answer("❌ Ошибка генерации. Проверьте логи.")
 
